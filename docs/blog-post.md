@@ -139,7 +139,7 @@ All 11 tools are also served over MCP, so Claude Desktop can call `centrality` a
 - Embeddings alongside full-text for duplicate detection. Right now similarity is full-text score plus Jaccard term overlap, which misses paraphrases.
 - Real auth, so `user_id` comes from a login instead of the client.
 
-The code is MIT-licensed: `TODO: repo URL`. There's a live demo at `TODO: live URL` and a 3-minute video at `TODO: video URL`. If you try it on your own org, I'd like to hear what the graph got wrong.
+The code is MIT-licensed: https://github.com/The-MathKing/tracebrain. There's a live demo at `TODO: live URL` and a 3-minute video at `TODO: video URL`. If you try it on your own org, I'd like to hear what the graph got wrong.
 
 ---
 

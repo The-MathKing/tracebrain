@@ -109,7 +109,7 @@ Every node has a unique string `key` (`person:<login>`, `file:<owner>/<repo>:<pa
 Requirements: Python 3.12+ (developed on 3.14), Node 20.19+ (or 22.12+), and an Anthropic or OpenRouter key for the agents. A GitHub token is only needed to ingest.
 
 ```bash
-git clone TODO-repo-url tracebrain && cd tracebrain
+git clone https://github.com/The-MathKing/tracebrain.git && cd tracebrain
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e './backend[lite]'  # `lite` = embedded FalkorDB (falkordblite); add `,dev` for pytest
 
