@@ -16,6 +16,7 @@ from .graphio import file_key, merge_edges, merge_nodes, module_key, person_key,
 TOP_ITEMS = 40
 MAX_COMMENT_CHARS = 1500
 MAX_PROMPT_CHARS = 14_000
+USAGE = {"input_tokens": 0, "output_tokens": 0, "calls": 0}  # process-wide, for spend reporting
 
 DECISION_SCHEMA = {
     "type": "object",
@@ -52,7 +53,8 @@ SUPERSEDE_TOOL = {
 SYSTEM = (
     "You extract durable engineering decisions (architecture, API design, dependencies, conventions, "
     "scope: what was chosen or rejected and why) from GitHub issue/PR threads. Ignore routine bug fixes "
-    "with no design choice, thanks, and CI chatter. Use only logins that appear in the thread. "
+    "with no design choice, thanks, and CI chatter. Return at most 4 of the most significant decisions per "
+    "thread. Use only logins that appear in the thread. "
     "Always call the provided tool exactly once; pass an empty list when there are no decisions."
 )
 
@@ -64,6 +66,10 @@ def decision_key(source_key: str, summary: str) -> str:
 def call_tool(llm, tool: dict, prompt: str, max_tokens: int = 4000) -> dict | None:
     resp = llm.messages.create(model=config.EXTRACT_MODEL, max_tokens=max_tokens, system=SYSTEM,
                                tools=[tool], messages=[{"role": "user", "content": prompt}])
+    if (u := getattr(resp, "usage", None)) is not None:
+        USAGE["input_tokens"] += getattr(u, "input_tokens", 0) or 0
+        USAGE["output_tokens"] += getattr(u, "output_tokens", 0) or 0
+    USAGE["calls"] += 1
     for block in resp.content:
         if getattr(block, "type", None) == "tool_use" and block.name == tool["name"]:
             return block.input
@@ -197,4 +203,4 @@ async def extract_decisions(gh: GitHub, graph, repo: str, llm=None, top: int = T
 
     counts = await asyncio.gather(*(one(i) for i in items))
     sup = link_supersedes(graph, repo, llm, log) if sum(counts) else 0
-    return {"threads": len(items), "decisions": sum(counts), "supersedes": sup}
+    return {"threads": len(items), "decisions": sum(counts), "supersedes": sup, "llm_usage_total": dict(USAGE)}

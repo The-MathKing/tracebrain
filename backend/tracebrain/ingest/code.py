@@ -1,12 +1,15 @@
 """Code ingest: default-branch tree -> File/Module nodes, Python imports -> (File)-[:IMPORTS]->(File)."""
 
 import ast
+import io
 import re
+import tarfile
 
 from .github import GitHub
 from .graphio import file_key, file_node, language, link_files_to_modules, merge_edges, merge_nodes
 
-MAX_PY_FILES = 400
+MAX_PY_FILES = 2000
+MAX_PY_BYTES = 1_000_000
 SKIP_DIRS = ("node_modules/", "vendor/", ".git/", "dist/", "build/", "__pycache__/")
 
 
@@ -110,17 +113,25 @@ async def ingest_code(gh: GitHub, graph, repo: str, branch: str | None = None, l
                                 for p in code])
     link_files_to_modules(graph, repo, code)
 
-    py = sorted((p for p in code if p.endswith(".py")), key=lambda p: (p.startswith(("tests/", "test/")), p))
+    py = [p for p in code if p.endswith(".py")]
     mods = module_map(py)
-    todo = py[:max_py]
-    log(f"{repo}: {len(code)} code files, fetching {len(todo)} .py sources")
-
-    async def src(p):
-        r = await gh.get(f"/repos/{repo}/contents/{p}", {"ref": sha}, raw=True)
-        return r.text if r.status_code == 200 else ""
-
-    sources = await gh.gather(src(p) for p in todo)
+    sources = await fetch_sources(gh, repo, sha, set(py[:max_py]))
+    log(f"{repo}: {len(code)} code files, {len(sources)} .py sources from tarball")
     rows = [{"src": file_key(repo, p), "dst": file_key(repo, t)}
-            for p, s in zip(todo, sources) for t in sorted(resolve_imports(p, s, mods))]
+            for p, s in sorted(sources.items()) for t in sorted(resolve_imports(p, s, mods))]
     imports = merge_edges(graph, "IMPORTS", "File", "File", rows)
-    return {"files": len(code), "py_parsed": len(todo), "imports": imports, "commit": sha}, paths
+    return {"files": len(code), "py_parsed": len(sources), "imports": imports, "commit": sha}, paths
+
+
+async def fetch_sources(gh: GitHub, repo: str, sha: str, wanted: set[str]) -> dict[str, str]:
+    """{path: source} for `wanted` paths from ONE tarball (redirects to codeload, outside the core limit)."""
+    r = await gh.get(f"/repos/{repo}/tarball/{sha}")
+    if r.status_code != 200:
+        return {}
+    out = {}
+    with tarfile.open(fileobj=io.BytesIO(r.content), mode="r:*") as tar:
+        for m in tar:
+            path = m.name.split("/", 1)[-1]  # strip "<owner>-<repo>-<sha>/"
+            if m.isfile() and path in wanted and m.size <= MAX_PY_BYTES:
+                out[path] = tar.extractfile(m).read().decode("utf-8", "replace")
+    return out

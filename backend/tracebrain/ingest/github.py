@@ -43,7 +43,7 @@ class GitHub:
             headers["Authorization"] = f"Bearer {token}"
         self.http = httpx.AsyncClient(base_url=API, headers=headers, timeout=30, follow_redirects=True)
         self.sem = asyncio.Semaphore(concurrency)
-        self.log, self.max_wait, self.requests = log, max_wait, 0
+        self.log, self.max_wait, self.requests, self.remaining = log, max_wait, 0, None
 
     async def __aenter__(self):
         return self
@@ -57,6 +57,10 @@ class GitHub:
             async with self.sem:
                 r = await self.http.get(path, params=params, headers=headers)
                 self.requests += 1
+            if (rem := r.headers.get("x-ratelimit-remaining")) is not None and rem.isdigit():
+                if self.remaining is None or int(rem) // 250 < self.remaining // 250:
+                    self.log(f"github rate limit: {rem} requests remaining")
+                self.remaining = int(rem)
             limited = r.status_code in (403, 429) and (
                 "retry-after" in r.headers or r.headers.get("x-ratelimit-remaining") == "0")
             if limited:
@@ -184,14 +188,18 @@ async def fetch_repo(gh: GitHub, repo: str) -> dict:
 
 async def _details(gh: GitHub, repo: str, it: dict) -> dict:
     n, is_pr = it["number"], "pull_request" in it
+    async def reviews_and_inline():  # inline comments always belong to a review: skip the call when none
+        reviews = await gh.paginate(f"/repos/{repo}/pulls/{n}/reviews")
+        return reviews, (await gh.paginate(f"/repos/{repo}/pulls/{n}/comments") if reviews else [])
+
     jobs = {"comments": gh.paginate(f"/repos/{repo}/issues/{n}/comments") if it.get("comments") else None}
     if is_pr:
-        jobs |= {"files": gh.paginate(f"/repos/{repo}/pulls/{n}/files", limit=1000),
-                 "reviews": gh.paginate(f"/repos/{repo}/pulls/{n}/reviews"),
-                 "review_comments": gh.paginate(f"/repos/{repo}/pulls/{n}/comments")}
+        jobs |= {"files": gh.paginate(f"/repos/{repo}/pulls/{n}/files", limit=1000), "_rv": reviews_and_inline()}
     keys = [k for k, v in jobs.items() if v is not None]
-    vals = await asyncio.gather(*(jobs[k] for k in keys))
-    return dict(zip(keys, vals))
+    out = dict(zip(keys, await asyncio.gather(*(jobs[k] for k in keys))))
+    if "_rv" in out:
+        out["reviews"], out["review_comments"] = out.pop("_rv")
+    return out
 
 
 def _person(u: dict) -> dict:

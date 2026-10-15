@@ -1,6 +1,7 @@
 """End-to-end ingest against a respx-mocked GitHub, into a throwaway test_<uuid> tenant graph."""
 
-import json
+import io
+import tarfile
 import uuid
 from types import SimpleNamespace
 
@@ -59,8 +60,21 @@ ROUTES = {
 }
 
 
+def tarball() -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for path, src in SOURCES.items():
+            data = src.encode()
+            info = tarfile.TarInfo(f"acme-widget-abc123/{path}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
 def handler(request: httpx.Request) -> httpx.Response:
     path = request.url.path
+    if path == f"/repos/{R}/tarball/abc123":
+        return httpx.Response(200, content=tarball())
     if path == f"/repos/{R}/issues":
         if request.url.params.get("page") == "2":
             return httpx.Response(200, json=ISSUES_P2)
@@ -71,6 +85,7 @@ def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"login": login, "name": login.title()})
     if path.startswith(f"/repos/{R}/contents/"):
         p = path.removeprefix(f"/repos/{R}/contents/")
+        assert not p.endswith(".py"), "code sources must come from the tarball"
         return httpx.Response(200, text=SOURCES[p]) if p in SOURCES else httpx.Response(404, json={})
     if path in ROUTES:
         return httpx.Response(200, json=ROUTES[path])

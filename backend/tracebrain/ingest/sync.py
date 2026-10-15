@@ -50,7 +50,7 @@ async def aingest_repo(repo: str, tenant: str | None = None, since: str | None =
         merge_nodes(graph, "SyncState", [{"key": sync_key(repo), "props": {
             "repo": repo, "title": f"sync {repo}", "last_synced_at": started,
             "last_ts": int(datetime.fromisoformat(started.replace("Z", "+00:00")).timestamp())}}])
-        counts["requests"] = gh.requests
+        counts["requests"], counts["rate_remaining"] = gh.requests, gh.remaining
     finally:
         if own:
             await gh.http.aclose()
