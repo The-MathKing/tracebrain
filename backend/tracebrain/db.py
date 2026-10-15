@@ -11,7 +11,11 @@ def get_db():
         from falkordb import FalkorDB
 
         return FalkorDB.from_url(config.FALKORDB_URL)
-    from redislite.falkordb_client import FalkorDB
+    try:
+        from redislite.falkordb_client import FalkorDB
+    except ImportError as e:  # falkordblite is the optional `lite` extra
+        raise RuntimeError("FALKORDB_URL is not set and embedded FalkorDB is not installed. "
+                           "Set FALKORDB_URL=redis://... or `pip install -e './backend[lite]'`.") from e
 
     Path(config.FALKORDB_LITE_PATH).parent.mkdir(parents=True, exist_ok=True)
     return FalkorDB(config.FALKORDB_LITE_PATH)

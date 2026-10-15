@@ -1,0 +1,25 @@
+# Render Blueprint: Dashboard -> New -> Blueprint -> pick this repo. See deploy/DEPLOY.md.
+services:
+  - type: web
+    name: tracebrain
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      # secrets: Render asks for these when you create the Blueprint
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: FALKORDB_URL          # e.g. redis://falkordb:PASSWORD@r-xxxx.falkordb.cloud:PORT
+        sync: false
+      - key: GITHUB_TOKEN          # read-only token, only needed for live ingest/sync
+        sync: false
+      # plain settings
+      - key: TRACEBRAIN_SEED_ON_START   # import deploy/snapshot into an empty FalkorDB on boot
+        value: "1"
+      - key: TRACEBRAIN_TENANT
+        value: falkordb
+      - key: TRACEBRAIN_ALLOW_GITHUB_WRITE
+        value: "0"

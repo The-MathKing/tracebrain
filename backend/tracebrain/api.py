@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import config, memory
@@ -49,12 +51,45 @@ def _ensure_schema(graph) -> None:
         log.warning("ensure_schema failed: %s", e)
 
 
+def _seed_in_background(tenant: str) -> None:
+    """Import the bundled snapshot when the tenant graph is empty (fresh FalkorDB Cloud instance).
+    Runs in a thread so the server binds its port immediately (Render's boot timeout)."""
+    def work():
+        try:
+            from .seed import seed_if_empty
+            seed_if_empty(tenant)
+        except Exception:  # noqa: BLE001
+            log.exception("seed-on-start failed")
+
+    threading.Thread(target=work, daemon=True, name="seed-on-start").start()
+
+
+def _mount_web(app: FastAPI) -> None:
+    """Serve the built frontend (web/dist) with an SPA fallback. Registered after every /api route."""
+    dist = Path(os.getenv("TRACEBRAIN_WEB_DIST") or (config.ROOT / "web" / "dist")).resolve()
+    index = dist / "index.html"
+    if not index.is_file():
+        return
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa(full_path: str):
+        if full_path == "api" or full_path.startswith("api/"):
+            raise HTTPException(404, "not found")
+        if full_path:
+            f = (dist / full_path).resolve()
+            if f.is_file() and f.is_relative_to(dist):
+                return FileResponse(f)
+        return FileResponse(index, headers={"Cache-Control": "no-cache"})
+
+
 def create_app(tenant: str | None = None, llm_factory: Callable[[], LLM] | None = None, http_client=None) -> FastAPI:
     tenant = tenant or config.TENANT
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         _ensure_schema(app.state.graph())
+        if os.getenv("TRACEBRAIN_SEED_ON_START") == "1":
+            _seed_in_background(app.state.tenant)
         yield
 
     app = FastAPI(title="TraceBrain", version="0.1.0", lifespan=lifespan)
@@ -205,6 +240,7 @@ def create_app(tenant: str | None = None, llm_factory: Callable[[], LLM] | None 
         return {"ok": ok_db, "falkordb": ok_db, "llm_configured": config.llm_configured(),
                 "tenant": app.state.tenant, "model": config.MODEL, "github_write": config.ALLOW_GITHUB_WRITE}
 
+    _mount_web(app)  # must stay last: its catch-all route would shadow anything registered after it
     return app
 
 
