@@ -53,6 +53,11 @@ def blast_radius(graph, key: str, depth: int = 3, limit: int = 100) -> dict:
         key=lambda x: (x["distance"], x["key"]),
     )[:limit]
     scope = seeds + [a["key"] for a in affected]
+    by_distance: dict[str, int] = {}
+    for k, d in dist.items():
+        if d > 0:
+            by_distance[str(d)] = by_distance.get(str(d), 0) + 1
+    total = sum(by_distance.values())
 
     modules = []
     for f, m in t.q("MATCH (f:File)-[:IN_MODULE]->(m:Module) WHERE f.key IN $files RETURN f.key, m", {"files": scope}):
@@ -108,6 +113,7 @@ def blast_radius(graph, key: str, depth: int = 3, limit: int = 100) -> dict:
 
     return t.result({
         "root": key, "seeds": seeds, "depth": depth,
-        "affected_files": affected, "affected_count": len(affected), "modules": modules,
+        "affected_files": affected, "affected_count": total, "affected_by_distance": by_distance,
+        "truncated": total > len(affected), "modules": modules,
         "owners": list(owners.values()), "recent_modifiers": list(modifiers.values()), "decisions": decisions,
     })

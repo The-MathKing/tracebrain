@@ -27,12 +27,18 @@ FULLTEXT_LABELS: dict[str, tuple[str, ...]] = {
 }
 # Searchable org labels (memory/coordination labels are excluded from general search).
 ORG_LABELS = ["Person", "Repo", "Module", "File", "Issue", "PullRequest", "Label", "Topic", "Decision"]
+# Relationship types of the org graph (memory/coordination edges such as CITED, TOUCHED, KNOWS are excluded so
+# exploration and path tools never route through Episodes, Facts or Tasks).
+ORG_RELS = ["AUTHORED", "REVIEWED", "COMMENTED_ON", "MODIFIES", "IN_MODULE", "IN_REPO", "IMPORTS", "CLOSES",
+            "REFERENCES", "HAS_LABEL", "OWNS", "DECIDED_IN", "MADE", "AFFECTS", "ABOUT", "SUPERSEDES"]
+# Cypher predicate keeping a path inside the org graph (Fact-[:ABOUT]-> and Fact-[:SUPERSEDES]-> share names).
+ORG_PATH_WHERE = "all(z IN nodes(p) WHERE " + " OR ".join(f"z:{l}" for l in ORG_LABELS) + ")"
 
 STOPWORDS = set(
     """a an and are as at be by for from has have how i in is it its of on or that the this to was
     were what when where which who whom why will with does do did can could should would about into
     me my we our you your they them their there these those any all some not no yes if then than so
-    know knows knew changed change changes decide decided""".split()
+    know knows knew changed change changes decide decided instead own ship ships rather""".split()
 )
 
 
@@ -140,6 +146,17 @@ def terms(text: str, max_terms: int = 12) -> list[str]:
     return out
 
 
+_SUFFIXES = ("encies", "ency", "ings", "ing", "ies", "ed", "es", "s", "y")
+
+
+def stem(t: str) -> str:
+    """Crude suffix strip so prefix search matches word variants ("depending"/"dependency" -> "depend")."""
+    for suf in _SUFFIXES:
+        if t.endswith(suf) and len(t) - len(suf) >= 4:
+            return t[: -len(suf)]
+    return t
+
+
 def fulltext_query(text: str) -> str | None:
     """Build a RediSearch query string (OR of terms, prefix match for longer terms)."""
     ts = terms(text)
@@ -147,6 +164,13 @@ def fulltext_query(text: str) -> str | None:
         return None
     parts = [f"{t}*" if len(t) >= 4 else t for t in ts]
     return "|".join(parts)
+
+
+def fulltext_exact(text: str) -> str | None:
+    """OR of exact terms. Prefix expansions (e.g. "embedd*" -> embedding) can bury precise matches in long
+    sentences, so search merges this pool with the prefix one."""
+    ts = terms(text)
+    return "|".join(ts) if ts else None
 
 
 def looks_like_key(s: str) -> bool:

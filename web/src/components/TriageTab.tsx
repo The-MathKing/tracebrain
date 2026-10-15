@@ -97,7 +97,7 @@ export function TriageTab({ plan, onFocus, onTry }: { plan: TriagePlan | null; o
       <div className="tab-empty">
         <Icon name="triage" size={20} />
         <p>No triage plan yet. Paste a GitHub issue URL starting with “Triage:” and the Triage agent will propose an owner, reviewers, blast radius, and a draft comment.</p>
-        <button className="btn btn-sm" onClick={onTry}>Try triaging GraphRAG-SDK#274</button>
+        <button className="btn btn-sm" onClick={onTry}>Try triaging GraphRAG-SDK#330</button>
       </div>
     )
   }

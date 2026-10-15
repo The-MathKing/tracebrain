@@ -37,8 +37,10 @@ about the USER (not about the codebase in general) for future sessions:
 - preference: how they like answers (format, length, language, which repo they care about)
 - semantic: what they work on / own / are investigating ("works on the vector index in falkordb-py")
 - procedural: how they do things ("runs triage for every new GraphRAG-SDK issue on Mondays")
-Only record facts clearly stated or strongly implied by the user. Skip one-off questions. Keep facts short and
-self-contained. If a new fact contradicts an existing one, put the old fact's key in `supersedes`.
+Record facts stated or clearly implied by the user. A question focused on one specific file, module, issue or
+PR implies what they are working on right now: record ONE semantic fact like "Is investigating who should review
+changes to graphrag_sdk api/main.py (GraphRAG-SDK)", with that entity's key in about_keys. Skip generic or
+exploratory questions ("who is most active?"). Keep facts short, self-contained, and name the repo. If a new fact contradicts an existing one, put the old fact's key in `supersedes`.
 Do not duplicate existing facts. Call record_memory exactly once (with an empty list if nothing is worth keeping)."""
 
 
@@ -47,8 +49,10 @@ def extract_facts(llm: LLM, question: str, answer: str, cited: list[str], existi
     prompt = (f"Existing valid facts about the user:\n{ex}\n\nUser message:\n{question}\n\n"
               f"Assistant answer (truncated):\n{answer[:2000]}\n\nCited keys: {', '.join(cited[:30]) or '(none)'}")
     messages = [{"role": "user", "content": prompt}]
+    if hasattr(llm, "with_effort"):
+        llm = llm.with_effort("low")  # bookkeeping call: keep it fast and cheap
     for attempt in range(2):
-        msg = llm.create(SYSTEM, [RECORD_TOOL], messages, max_tokens=4000)
+        msg = llm.create(SYSTEM, [RECORD_TOOL], messages, max_tokens=3000)
         content = list(getattr(msg, "content", None) or [])
         if getattr(msg, "stop_reason", None) == "refusal":
             return []

@@ -18,6 +18,22 @@ from .llm import LLM, AgentRun, LLMNotConfigured, cited_keys
 log = logging.getLogger("tracebrain.coordinator")
 
 TRIAGE_RE = re.compile(r"^\s*triage\b", re.IGNORECASE)
+# Questions about the user's own history: recall gets more episodes plus their recent work facts.
+SELF_RE = re.compile(r"\b(last time|last session|previous(ly)?|earlier|remind me|where (did|was) i|what (was|were|did|am) i|"
+                     r"i was (working|looking|investigating)|my (work|questions|history))\b", re.IGNORECASE)
+
+
+def recall_for(graph, user_id: str, message: str) -> dict:
+    """memory.recall, widened for self-referential questions ("what was I working on last time?"), whose words
+    rarely match the stored facts' text."""
+    if not SELF_RE.search(message or ""):
+        return memory.recall(graph, user_id, message)["data"]
+    rec = memory.recall(graph, user_id, message, episodes=6)["data"]
+    have = {f["key"] for f in rec["facts"]}
+    extra = [f for f in memory.get_memory(graph, user_id, limit=12)["facts"]
+             if f.get("valid") and f["key"] not in have][:6]
+    rec["facts"] = rec["facts"] + [{**f, "why": ["recent"]} for f in extra]
+    return rec
 
 
 def route(message: str) -> str:
@@ -47,8 +63,7 @@ def run_chat(graph, llm: LLM, user_id: str, message: str, session_id: str | None
         if not message:
             raise ToolError("empty message")
         # 1. recall memory first
-        rec = memory.recall(graph, user_id, message)
-        recalled = rec["data"]
+        recalled = recall_for(graph, user_id, message)
         yield {"type": "step", "agent": "coordinator", "tool": "recall", "input": {"query": message[:200]},
                "summary": f"recalled {len(recalled['facts'])} facts, {len(recalled['episodes'])} episodes"}
         yield {"type": "memory", "written": [], "recalled": _mem_items(recalled["facts"])}
@@ -73,10 +88,12 @@ def run_chat(graph, llm: LLM, user_id: str, message: str, session_id: str | None
         # 3. answer with resolved citations
         keys = cited_keys(run.final_text)
         citations = nodes_by_keys(graph, keys)
-        yield {"type": "answer", "text": run.final_text, "citations": citations, "agent": agent}
+        yield {"type": "answer", "text": run.final_text, "citations": citations, "agent": agent,
+               "usage": run.usage or None}
         board.touch(graph, child, [c["id"] for c in citations] + run.touched)
         out = {"answer": run.final_text, "citations": [c["id"] for c in citations],
-               "tool_calls": [{"tool": c["tool"], "input": c["input"]} for c in run.tool_calls]}
+               "tool_calls": [{"tool": c["tool"], "input": c["input"]} for c in run.tool_calls],
+               "usage": run.usage}
         if agent == "triage":
             out["plan"] = getattr(run, "plan", None)
         board.update_task(graph, child, "done", out)

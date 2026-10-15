@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Iterator
 
-from .llm import LLM, AgentRun, run_agent
+from .llm import CITE_RE, LLM, AgentRun, run_agent
 
 TOOLS = ["search_entities", "get_neighbors", "find_experts", "trace_decision", "blast_radius", "find_related_work",
          "shortest_path", "centrality", "run_cypher", "recall"]
@@ -24,16 +24,29 @@ Graph schema (node keys in brackets):
   (Decision)-[:SUPERSEDES]->(Decision).
 
 How to work:
-1. Resolve names in the question to keys with search_entities (unless you were given keys).
+1. Resolve names in the question to keys with search_entities (unless you were given keys). Skip this when the
+   question already names an exact key or path you can turn into a key.
 2. Use the most specific tool: find_experts, trace_decision, blast_radius, shortest_path, find_related_work,
    centrality. Use get_neighbors to explore and run_cypher (read-only) only when nothing else fits.
-   Call independent tools in parallel in one turn. Usually 2-5 tool calls are enough.
-3. Answer concisely in Markdown. Cite every entity you mention inline with its exact key in double brackets,
-   e.g. "[[person:alice]] reviewed [[pr:FalkorDB/falkordb-py#42]]". Only cite keys that appeared in tool results.
-4. Explain the evidence path briefly (e.g. "authored 3 PRs touching this file in the last 90 days, owns the module").
-   If the graph lacks the evidence, say so plainly and suggest what would help.
-5. A <memory> block may describe the user (preferences, current work) and recent conversation. Use it to tailor
-   the answer (e.g. their preferred format or repo), but do not cite memory keys.
+   Call independent tools in parallel in one turn. Usually 2-4 tool calls are enough. Tool results are compact
+   summaries with complete counts (e.g. blast_radius gives affected_count, affected_by_distance and
+   affected_by_directory); trust them instead of re-counting with run_cypher.
+3. Decisions: for "why" questions call trace_decision first. Quote the decision's rationale/quote briefly and cite
+   the Decision, its source issue/PR and the people who made it. If it returns only `discussions`, say no recorded
+   decision matched and summarize the closest discussions instead.
+4. Paths: for "how is A connected to B" call shortest_path and narrate each hop in order
+   ("[[a]] AUTHORED [[pr]] which MODIFIES [[file]] ...").
+5. Answer in Markdown for a busy engineer: lead with a one or two sentence answer in bold, then at most 3 short
+   sections or 6-8 bullets. Aim for 120-220 words. Summarize long lists with counts and name only the 3-5 most
+   important items. No tables wider than 4 columns, no generic advice paragraphs.
+6. Cite every entity you mention inline with its exact key in double brackets, e.g.
+   "[[person:alice]] reviewed [[pr:FalkorDB/falkordb-py#42]]". Only cite keys that appeared in tool results or in
+   the <memory> block. Give each claim its evidence briefly (e.g. "authored 3 PRs touching this file since July").
+   If the graph lacks the evidence, say so in one line.
+7. A <memory> block may describe the user (facts, recent questions from earlier sessions). Use it to tailor the
+   answer. When the user asks about their own history ("what was I working on?", "last time"), answer from the
+   <memory> block: list what they asked about and the key findings, citing the graph keys listed there, then
+   offer one concrete next step (you may call a tool to refresh it). Never cite fact:/episode: keys.
 """
 
 
@@ -47,9 +60,13 @@ def memory_block(recalled: dict | None) -> str:
         lines += [f"- ({f['kind']}) {f['text']}" for f in facts]
     eps = recalled.get("episodes") or []
     if eps:
-        lines.append("Recent conversation (newest first):")
+        lines.append("Recent questions from this user (newest first):")
         for e in eps:
-            lines.append(f"- Q: {e['question'][:200]}\n  A: {(e.get('answer') or '')[:300]}")
+            ans = e.get("answer") or ""
+            keys = list(dict.fromkeys(CITE_RE.findall(ans)))[:8]
+            when = (e.get("created_at") or "")[:16].replace("T", " ")
+            lines.append(f"- [{when}] Q: {e['question'][:200]}\n  A: {ans[:300]}"
+                         + (f"\n  Keys: {', '.join(keys)}" if keys else ""))
     return "<memory>\n" + "\n".join(lines) + "\n</memory>\n\n" if lines else ""
 
 

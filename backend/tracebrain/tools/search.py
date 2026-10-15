@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from .common import (
+from .common import (fulltext_exact, stem, 
     FULLTEXT_LABELS,
     ORG_LABELS,
     Tracer,
@@ -40,7 +40,18 @@ def _coverage(node: dict, ts: list[str]) -> float:
     if not ts:
         return 0.0
     h = _haystack(node)
-    return sum(1 for t in ts if t in h) / len(ts)
+    return sum(1 for t in ts if stem(t) in h) / len(ts)
+
+
+def _merge_hits(a: list, b: list) -> list:
+    """Union of two hit lists, each score normalized to its own max; keeps the best per node."""
+    out: dict[str, tuple[dict, float]] = {}
+    for hits in (a, b):
+        top = max((s for _, s in hits), default=0) or 1.0
+        for d, s in hits:
+            if d["id"] not in out or out[d["id"]][1] < s / top:
+                out[d["id"]] = (d, s / top)
+    return list(out.values())
 
 
 def _ft_label(t: Tracer, label: str, ftq: str, limit: int) -> list[tuple[dict, float]] | None:
@@ -105,6 +116,9 @@ def search_entities(graph, query: str, labels: list[str] | None = None, limit: i
         hits = None
         if label in FULLTEXT_LABELS and ftq:
             hits = _ft_label(t, label, ftq, limit * 2)
+            exact = fulltext_exact(query)
+            if hits is not None and exact and len(terms(query)) >= 4:  # long, sentence-like queries
+                hits = _merge_hits(hits, _ft_label(t, label, exact, limit * 2) or [])
         if not hits:
             hits = _contains_label(t, label, ts, limit * 2)
         if not hits:

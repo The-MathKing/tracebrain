@@ -18,6 +18,11 @@ from ..tools import registry
 from ..tools.common import ToolError
 from .llm import LLM, AgentRun, run_agent
 
+# Triage is a fixed recipe (search -> experts/blast radius -> structured plan); low effort keeps it well under
+# 40s without losing plan quality (see docs/demo-qa.md).
+EFFORT = "low"
+ISSUE_BODY_CHARS = 3500
+
 ISSUE_URL_RE = re.compile(r"https?://github\.com/([\w.-]+)/([\w.-]+)/issues/(\d+)")
 
 TOOLS = ["search_entities", "find_related_work", "find_experts", "blast_radius", "get_neighbors", "trace_decision",
@@ -67,8 +72,11 @@ Given a new issue, produce a triage plan grounded ONLY in graph evidence:
 4. find_experts on the most relevant file or module -> pick an assignee and exactly 2 different reviewers,
    each with a concrete reason from the evidence (owns module, authored N recent PRs touching file, reviewed ...).
    Prefer people active recently; never pick bots.
-5. Suggest labels (reuse existing label names where you saw them) and a priority.
-6. Write a short, friendly draft GitHub comment (Markdown) summarizing the plan and linking duplicates by #number.
+   If an open PR already CLOSES or references this issue, its author is usually the right assignee.
+5. Suggest labels from the repo's existing labels (listed in the message) plus at most one new label, and a priority.
+6. Write a short, friendly draft GitHub comment (Markdown, under 150 words, no emoji): one line of thanks, the
+   likely cause/location, linked prior work or duplicates by #number, who will pick it up (@login) and why, and what
+   to test. Never claim it was posted.
 Call independent tools in parallel. Then you MUST call submit_triage_plan exactly once with the plan; use only keys
 that appeared in tool results. You never post to GitHub yourself.
 """
@@ -107,6 +115,15 @@ def fetch_issue(url: str, http: httpx.Client | None = None) -> dict:
     finally:
         if http is None:
             client.close()
+    if r.status_code in (401, 403) and "Authorization" in r.request.headers:
+        # token exhausted/invalid (e.g. a parallel ingest used the rate limit): public issues work anonymously
+        anon = {k: v for k, v in _gh_headers().items() if k != "Authorization"}
+        client = http or httpx.Client(timeout=15)
+        try:
+            r = client.get(f"https://api.github.com/repos/{owner}/{repo}/issues/{n}", headers=anon)
+        finally:
+            if http is None:
+                client.close()
     if r.status_code != 200:
         raise ToolError(f"GitHub returned {r.status_code} for {owner}/{repo}#{n}")
     j = r.json()
@@ -114,6 +131,33 @@ def fetch_issue(url: str, http: httpx.Client | None = None) -> dict:
             "title": j.get("title") or "", "body": (j.get("body") or "")[:6000], "state": j.get("state"),
             "labels": [l["name"] if isinstance(l, dict) else str(l) for l in j.get("labels") or []],
             "author": (j.get("user") or {}).get("login")}
+
+
+def issue_from_graph(graph, url: str) -> dict | None:
+    """The ingested Issue node for a GitHub issue URL (used when the live GitHub fetch fails, e.g. rate limits)."""
+    m = ISSUE_URL_RE.search(url or "")
+    if not m:
+        return None
+    key = f"issue:{m.group(1)}/{m.group(2)}#{m.group(3)}"
+    rows = graph.ro_query("MATCH (i:Issue {key: $k}) OPTIONAL MATCH (i)-[:HAS_LABEL]->(l:Label) "
+                          "RETURN i, collect(l.name)", {"k": key}).result_set
+    if not rows:
+        return None
+    p = rows[0][0].properties
+    return {"key": key, "repo": f"{m.group(1)}/{m.group(2)}", "number": int(m.group(3)), "url": p.get("url") or url,
+            "title": p.get("title") or "", "body": (p.get("body") or "")[:6000], "state": p.get("state"),
+            "labels": [x for x in rows[0][1] if x], "author": None}
+
+
+def repo_labels(graph, repo: str | None, limit: int = 40) -> list[str]:
+    if not repo:
+        return []
+    try:
+        rows = graph.ro_query("MATCH (l:Label) WHERE l.key STARTS WITH $p RETURN l.name ORDER BY l.name LIMIT $n",
+                              {"p": f"label:{repo}:", "n": limit}).result_set
+    except Exception:  # noqa: BLE001 - labels are a hint only
+        return []
+    return [r[0] for r in rows if r[0]]
 
 
 def post_comment(issue_url: str, body: str, http: httpx.Client | None = None) -> dict:
@@ -217,17 +261,28 @@ def run(llm: LLM, graph, message: str, *, context: dict, recalled: dict | None =
             yield {"type": "step", "agent": "triage", "tool": "fetch_github_issue", "input": {"url": url},
                    "summary": f"fetched {issue['repo']}#{issue['number']}: {issue['title'][:80]}"}
         except (ToolError, httpx.HTTPError) as e:
-            yield {"type": "step", "agent": "triage", "tool": "fetch_github_issue", "input": {"url": url},
-                   "summary": f"could not fetch issue ({e}); triaging from the message text"}
-            issue = {"key": None, "url": url, "title": "", "body": text, "labels": []}
+            cached = issue_from_graph(graph, url)
+            if cached:
+                issue = cached
+                yield {"type": "step", "agent": "triage", "tool": "fetch_github_issue", "input": {"url": url},
+                       "summary": f"GitHub fetch failed ({e}); using the ingested copy of {issue['repo']}#{issue['number']}"}
+            else:
+                yield {"type": "step", "agent": "triage", "tool": "fetch_github_issue", "input": {"url": url},
+                       "summary": f"could not fetch issue ({e}); triaging from the message text"}
+                issue = {"key": None, "url": url, "title": "", "body": text, "labels": []}
     captured: dict = {}
 
     def on_extra(name, args):
         captured["plan"] = args
         return "Plan recorded.", True
 
+    labels = repo_labels(graph, issue.get("repo"))
     issue_text = (f"Issue: {issue.get('title')}\nURL: {issue.get('url')}\nKey: {issue.get('key')}\n"
-                  f"Existing labels: {issue.get('labels')}\n\n{issue.get('body') or text}")
+                  f"Existing labels on the issue: {issue.get('labels')}\n"
+                  + (f"Labels used in this repo: {', '.join(labels)}\n" if labels else "")
+                  + f"\n{(issue.get('body') or text)[:ISSUE_BODY_CHARS]}")
+    if EFFORT and hasattr(llm, "with_effort"):
+        llm = llm.with_effort(EFFORT)
     messages = [{"role": "user", "content": memory_block(recalled) + "Triage this issue.\n\n" + issue_text}]
     yield from run_agent(llm, agent="triage", system=SYSTEM, messages=messages, graph=graph, tool_names=TOOLS,
                          context=context, extra_tools=[SUBMIT_TOOL], on_extra=on_extra, run=run_)

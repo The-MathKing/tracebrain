@@ -5,10 +5,12 @@ import { StepTimeline } from './StepTimeline'
 import { Icon } from './Icon'
 
 export const EXAMPLES = [
-  'Who knows the most about the Cypher query generation code?',
-  'Why did GraphRAG-SDK switch its LLM abstraction?',
-  'What breaks if falkordb/graph.py changes?',
-  'Triage: https://github.com/FalkorDB/GraphRAG-SDK/issues/274',
+  'Who knows the most about the GraphRAG-SDK api/main.py facade, and who should review changes to it?',
+  'Why does falkordb-py ship its own embedded FalkorDB server code instead of depending on falkordblite?',
+  'What breaks if graphrag_sdk core/models.py changes?',
+  'Triage: https://github.com/FalkorDB/GraphRAG-SDK/issues/330',
+  'How is mikemikimike connected to the GraphRAG-SDK ontology store (storage/ontology_store.py)?',
+  'What was I working on last time?',
 ]
 
 interface Props {

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -31,7 +32,10 @@ _FEATURE_PATTERNS = {
     "cache_control": r"cache_control|cache control|caching",
     "strict": r"strict",
 }
-TOOL_RESULT_MAX_CHARS = 14000
+TOOL_RESULT_MAX_CHARS = 9000
+LIST_CAP = 25  # list items kept per list in the LLM's copy of a tool result (the UI trace keeps everything)
+# Fields the model never needs (UI-only or redundant with `key`); dropping them roughly halves token use.
+_DROP_FIELDS = {"url", "avatar_url", "score_breakdown", "why", "source_url"}
 
 
 class LLMNotConfigured(RuntimeError):
@@ -113,6 +117,12 @@ class LLM:
                 _DISABLED.add(feat)
         raise LLMError("request kept failing after dropping optional features")
 
+    def with_effort(self, effort: str) -> "LLM":
+        """Same client/model at another effort level (e.g. "low" for the historian's bookkeeping call)."""
+        other = copy.copy(self)
+        other.effort = effort
+        return other
+
     def create(self, system: str, tools: list[dict], messages: list, max_tokens: int | None = None):
         return self._with_downgrade(lambda kw: self.client.messages.create(**kw), system, tools, messages, max_tokens)
 
@@ -151,6 +161,23 @@ class AgentRun:
     stopped_by_tool: str | None = None
     error: str | None = None
     messages: list = field(default_factory=list)
+    usage: dict = field(default_factory=dict)
+
+
+USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def add_usage(acc: dict, msg) -> dict:
+    """Accumulate a response's token usage into `acc` (missing fields are ignored)."""
+    u = _block_get(msg, "usage")
+    if u is None:
+        return acc
+    for f in USAGE_FIELDS:
+        v = _block_get(u, f)
+        if isinstance(v, (int, float)):
+            acc[f] = acc.get(f, 0) + int(v)
+    acc["calls"] = acc.get("calls", 0) + 1
+    return acc
 
 
 def _block_get(b, attr, default=None):
@@ -166,19 +193,75 @@ def highlight_keys(name: str, args: dict, data: dict) -> list[str]:
     d = data or {}
     if name == "shortest_path":
         keys += d.get("path") or []
+    if name == "find_experts":
+        # the top expert's strongest evidence path: person -> PR -> file
+        for e in (d.get("experts") or [])[:1]:
+            for ev in (e.get("top_evidence") or [])[:1]:
+                keys += [k for k in ev.get("path") or [] if isinstance(k, str) and ":" in k]
+    if name == "trace_decision":
+        for dec in (d.get("decisions") or [])[:1]:
+            keys.append(dec.get("key"))
+            keys += [s_.get("key") for s_ in dec.get("sources") or []]
+            keys += [p.get("key") for p in dec.get("people") or []]
+            keys += list(dec.get("supersedes") or []) + list(dec.get("affects") or [])[:3]
+        for disc in (d.get("discussions") or [])[:3]:
+            keys.append(disc.get("key"))
     for k in ("results", "experts", "candidates", "decisions", "affected_files", "ranking", "neighbors", "facts"):
         for item in (d.get(k) or [])[:5]:
             if isinstance(item, dict) and item.get("key"):
                 keys.append(item["key"])
     for o in (d.get("owners") or [])[:3]:
         keys.append(o["key"])
-    return list(dict.fromkeys(keys))
+    return [k for k in dict.fromkeys(keys) if k]
 
 
-def _tool_result_content(data: Any) -> str:
-    s = json.dumps(data, default=str, ensure_ascii=False)
+def _compact(v: Any, depth: int = 0) -> Any:
+    if isinstance(v, dict):
+        out = {}
+        for k, x in v.items():
+            if k in _DROP_FIELDS or x is None or x == [] or x == {}:
+                continue
+            if k == "path" and isinstance(x, list):  # evidence paths: `via` already names the hop
+                continue
+            if k == "path" and isinstance(x, str) and str(v.get("key", "")).endswith(x):
+                continue  # file path duplicated inside the key
+            out[k] = _compact(x, depth + 1)
+        return out
+    if isinstance(v, list):
+        cap = LIST_CAP if depth <= 1 else 5
+        items = [_compact(x, depth + 1) for x in v[:cap]]
+        if len(v) > cap:
+            items.append(f"(+{len(v) - cap} more not shown)")
+        return items
+    if isinstance(v, str) and len(v) > 600:
+        return v[:600] + "..."
+    return v
+
+
+def compact_for_llm(name: str, data: Any) -> Any:
+    """The model's copy of a tool result: drop UI-only fields, cap lists, and pre-aggregate big results
+    (so the model doesn't burn extra run_cypher calls re-counting a truncated list)."""
+    if not isinstance(data, dict):
+        return data
+    d = dict(data)
+    if name == "blast_radius" and isinstance(d.get("affected_files"), list):
+        files = d["affected_files"]
+        by_mod: dict[str, int] = {}
+        for f in files:
+            k = f.get("key", "")
+            path = k.split(":", 2)[-1]
+            mod = path.rsplit("/", 1)[0] if "/" in path else "."
+            by_mod[mod] = by_mod.get(mod, 0) + 1
+        d["affected_by_directory"] = dict(sorted(by_mod.items(), key=lambda x: -x[1])[:12])
+        d["affected_files"] = [{"key": f["key"], "distance": f.get("distance")} for f in files[:LIST_CAP - 1]] + (
+            [f"(+{len(files) - LIST_CAP + 1} more; the counts are complete)"] if len(files) > LIST_CAP - 1 else [])
+    return _compact(d)
+
+
+def _tool_result_content(data: Any, name: str = "") -> str:
+    s = json.dumps(compact_for_llm(name, data), default=str, ensure_ascii=False, separators=(",", ":"))
     if len(s) > TOOL_RESULT_MAX_CHARS:
-        s = s[:TOOL_RESULT_MAX_CHARS] + '..."(truncated)"'
+        s = s[:TOOL_RESULT_MAX_CHARS] + '..."(truncated: narrow the query for more)"'
     return s
 
 
@@ -215,6 +298,7 @@ def run_agent(
                 yield {"type": "token", "text": val, "agent": agent}
             else:
                 msg = val
+        add_usage(run.usage, msg)
         stop = _block_get(msg, "stop_reason")
         content = list(_block_get(msg, "content") or [])
         if stop == "refusal":
@@ -266,7 +350,7 @@ def run_agent(
             if tr["nodes"]:
                 yield {"type": "subgraph", "nodes": tr["nodes"], "edges": tr["edges"],
                        "highlight": highlight_keys(name, args, res["data"]), "agent": agent}
-            results.append({"type": "tool_result", "tool_use_id": tid, "content": _tool_result_content(res["data"])})
+            results.append({"type": "tool_result", "tool_use_id": tid, "content": _tool_result_content(res["data"], name)})
         # All results of this turn go back in ONE user message.
         user_content: list = list(results)
         if it >= max_iters - 1 and not stop_loop and not budget_notice_sent:
